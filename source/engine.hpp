@@ -222,7 +222,11 @@ private:
     int z = ((m[0x94] << 8) | m[0x90]) + 0xAF;
     m[0x378] = bb(z); m[0x37C] = bb(z >> 8);
     if (m[0x388] == 2) { int z16 = ((m[0x37C] << 8) | m[0x378]) >> 1; m[0x37C] = bb(z16 >> 8); m[0x378] = bb(z16); }
-    arcStep(m[0x5C] & 1);
+    // Carry-in of the launch-frame arc step (sub_DD06: JSR sub_DD38; JMP loc_DD1A -> sub_DD6F ADC) is NOT
+    // the R-button bit (that LSR gate only runs on the regular airborne path, bra_DD11). It is whatever the
+    // player tail of sub_DD38 leaves in C: four ASLs of velX_hi (DD60-DD65) -> C = bit 4 of velX_hi (0 for
+    // any velX < 4096). Using 0x5C&1 here gave 0x380 a +1 offset on every R-held launch (QNES diff 2026-10-09).
+    arcStep((m[0x94] >> 4) & 1);
     if (m[0xCC] == 0) m[0x364] = 1;
   }
   void arcStep(int cin)  // sub_DD6F
@@ -565,6 +569,9 @@ private:
       if (bd == 0 || (bd & 0x80)) { m[0x64] = bb(bd + 8); m[0xE0] = (m[0xE0] + 1) & 0x3F; _cum++; }
       else m[0x64] = bd;
     }
+    m[0xD8] = 0;  // bra_E72B: the loop clears 0xD8 for every object at the end of each frame (unconditionally),
+                  // so the ramp's slow-launch threshold (E944 CMP 0xD8) only sees a value set EARLIER IN THE SAME
+                  // frame's feature scan. Without this the native kept 0x60/0x80/0x40 forever (QNES diff 2026-10-09).
   }
 
   void updateDerived()

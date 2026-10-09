@@ -109,7 +109,7 @@ class Engine:
             z16=((m[0x37C]<<8)|m[0x378])>>1
             m[0x37C]=(z16>>8)&0xFF; m[0x378]=z16&0xFF
         # one immediate arc step at loc_DD1A (carry-in = ? leftover; use 0x5C bit0 like normal)
-        self.arc_step(m[0x5C]&1)
+        self.arc_step((m[0x94]>>4)&1)  # launch-frame carry = bit4 of velX_hi (sub_DD38 ASLs), not the R bit
         if m[0xCC]==0: m[0x364]=1
     def arc_step(self, cin):
         m=self.m
@@ -397,6 +397,7 @@ class Engine:
                 m[0x64]=b(bd+8); m[0xE0]=(m[0xE0]+1)&0x3F; self.cum+=1
             else:
                 m[0x64]=bd
+        m[0xD8]=0  # bra_E72B: cleared for every object at the end of each frame (unconditional)
 
     def updateDerived(self):
         m=self.m
