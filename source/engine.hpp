@@ -29,7 +29,15 @@
 #include <cstring>
 #include <cstddef>
 
+#ifdef EB_TRACK_LAYOUT
+#include EB_TRACK_LAYOUT          // alternative track table (e.g. "track_layout_t2.hpp"), same symbols
+#else
 #include "track_layout.hpp"   // generated: kTrack[6][1376] (per-lane terrain tiles)
+#endif
+#ifndef EB_LAP1
+#define EB_LAP1 668   // cumulative columns where the lap counter advances (track 1: 668 / 1335; track 2: 605 / 1209)
+#define EB_LAP2 1335
+#endif
 #include "track_sections.hpp" // generated: kSections / kSectionLen (per-section feature lists)
 
 namespace excitebike
@@ -93,7 +101,7 @@ public:
     // finish-line win check.
     if (_cum != 0)
     {
-      int laps = 1 + (_cum >= 668) + (_cum >= 1335);
+      int laps = 1 + (_cum >= EB_LAP1) + (_cum >= EB_LAP2);
       m[A_CURRENT_LOOP] = (uint8_t)laps; m[A_LOOPS_REMAIN] = (uint8_t)(3 - laps);
       if (m[A_LOOPS_REMAIN] == 0) m[0x3BC] = 1;
     }
@@ -110,7 +118,7 @@ public:
     stepTemp();                                              // sub_E359
     if (m[A_TEMP] >= 0x20) { m[0x3C] = m[A_TEMP]; m[0x3E0] = m[A_TEMP]; } // loc_E3AA overheat arm
     stepLane();                                              // sub_E96C
-    if (m[A_AIRMODE] == 0) m[0x8C] = bb(m[0x3F1] - m[0xBC] - m[0xB8]); // sub_E836 (visual 0x8C on ground)
+    if (m[A_AIRMODE] == 0) m[0x8C] = groundY(); // sub_E836 (visual 0x8C on ground) via sub_DC97
     // sub_DA26: posX-part1 -> landing -> arc -> wobble-dec -> posX-part2
     stepPosX1(); landing(); arc(); wobbleDec(); stepPosX2();
     colCounter();                                            // sub_E70B (late)
@@ -248,7 +256,7 @@ private:
         if (m[0xB0] == 0 && m[0x94] != 0)
         {
           int y = (m[0x94] < 2 && m[0x90] < m[0xD8]) ? 1 : 0; m[0x388] = (uint8_t)y;
-          if (m[0xA0] != 2) takeoff(0);
+          if (m[0xA0] != 2) takeoff(0); else takeoff(m[0x94]);   // E94D: big-jump flag 2 -> loc_DD06 (0x384 = velX_hi)
         }
         break;
       case 0x13: // downhill E8E7: airborne (0xB0!=0) -> RTS, NO velX boost (gravity boosts velX only
@@ -268,7 +276,20 @@ private:
       case 0x04: m[0xD8] = 0x80; e84F((uint8_t)(e893(5) >> 1)); break;
       case 0x05: e86F((uint8_t)(e893(2) >> 1)); break;
       case 0x09: e84F(bb(e893(4) << 1)); if (m[0xA0] != 0) e84F(bb(m[0xBC] + 0x10)); m[0xD8] = 0x40; break;
-      case 0x0A: if (m[0xA4] != 1) e86F(bb(e893(3) << 1)); break;
+      case 0x0A: // E89D: skipped when 0xA4==1; with 0xA4==4 (lane-pulled hill) -> DD06 takeoff, 0xA4=2, 0x364=2
+        if (m[0xA4] == 1) break;
+        e86F(bb(e893(3) << 1));
+        if (m[0xA4] == 4) { takeoff(m[0x94]); m[0xA4] = 2; m[0x364] = 2; }
+        break;
+      // ---- handlers added 2026-10-10 from the public disassembly (bank_FF E8E3/E8EE/E8F5/E8FA/E956/E8BF/E8C6);
+      //      none of them occurs on track 1 lanes 0-2, all occur on track 2 ----
+      case 0x01: m[0xA0] = 1; break;                                   // E8E3: arm the big-jump flag
+      case 0x0B: m[0xA0] = 2; m[0xD8] = 1; e84F(0x30); break;          // E8EE: big-jump 2 + slow-launch threshold 1, then height 0x30
+      case 0x14: e84F(0x30); break;                                    // E8F5
+      case 0x10: e84F(0x10); break;                                    // E8FA
+      case 0x0D: if (m[0xA4] == 1) { m[0xBC] = 0; takeoff(m[0x94]); } break; // E956: drop-off takeoff (0x384 = velX_hi)
+      case 0x0E: m[0xA4] = 0; m[0xA0] = 0; break;                      // E8BF: clear contact mode + big-jump flag
+      case 0x0F: m[0xA4] = 1; if (m[0xB8] < 0x20) m[0xA4] = 2; break;  // E8C6: contact mode 1 (2 in the low lanes)
       case 0x08: // finish line E8AF -> win (0x52=1) iff all laps done (0x57==0)
         m[0x3A] = 0x1D;
         if (m[A_LOOPS_REMAIN] == 0) { m[0x32] = 0x10; m[0xFD] = 2; m[A_RACE_OVER] = 1; m[0x3A] = 0; }
@@ -397,8 +418,14 @@ private:
     // through to the CE0A latch-arm below (== brake for the player).
     if (m[0xC0] != 0xE4 && !(m[0xA4] == 3 && m[0x70] >= 3) && m[0xB8] >= 0x08 && m[0xB8] < 0x38)
     {
-      if (m[0x36C] == 1) return true;                      // CE1F-CE22: latched -> brake
-      m[0x36C] = 0;                                        // CE24-CE25: clear latch -> accelerate
+      // Latch semantics (QNES ground truth 2026-10-10, track-1 throttle-A run in lane 5, section 13 mud):
+      // the mud handler sets 0x36C=1 and applies its own friction; the throttle step then ACCELERATES normally
+      // (800 -> 697 -> 594 = -127 +24 per update) and the latch stays 1 for the section. The brake on this path
+      // is therefore the wheelie/height re-entry (latch armed to 2 by the branch below), taken once and cleared.
+      // Height re-entry experiment (QNES 2026-10-10, b8 57 -> 50 with B): the armed latch (2) is simply cleared
+      // and the throttle accelerates on the very next update -- no re-entry brake. So this branch never brakes.
+      if (m[0x36C] == 1) return false;                     // mud latch: no extra brake, keep the latch
+      m[0x36C] = 0;                                        // CE24-CE25: clear an armed latch -> accelerate
       return false;
     }
     if (m[0x36C] != 1) m[0x36C] = 2;                       // CE0A-CE12: arm latch (2) unless already 1
@@ -510,19 +537,25 @@ private:
     }
   }
 
+  // sub_DC97: LDA $3F1 (=0xA0); SEC; SBC bc; SBC b8 -- the second SBC inherits the borrow of the first, so when the
+  // slope byte exceeds 0xA0 (a downhill that wrapped negative, e.g. 0xFF) the result is one lower than 0xA0-bc-b8.
+  // (QNES diff 2026-10-10: posY off by one for two frames at such slopes on track 2.)
+  uint8_t groundY() const { int t = (int)_mem[0x3F1] - _mem[0xBC]; int borrow = t < 0 ? 1 : 0; return bb(t - _mem[0xB8] - borrow); }
+
   // ---- landing / arc (sub_DC1A / sub_DCF2) ----
   void landing()  // sub_DC1A
   {
     uint8_t* m = _mem;
     if (m[0xB0] != 2) return;
-    uint8_t groundY = bb(0xA0 - m[0xBC] - m[0xB8]);
+    uint8_t groundY = this->groundY();
     if (!(m[0x8C] > groundY && m[0x8C] < 0xA8 && m[0x364] != 0)) return;
-    m[0xB0] = 0; m[0x364] = 0; uint8_t oldJ = m[0x388]; m[0x388] = 0; m[0x8C] = bb(groundY - 1);
-    if (oldJ != 0) return;                              // post-bounce clean landing
+    m[0xB0] = 0; m[0x364] = 0; uint8_t oldJ = m[0x388]; m[0x388] = 0;
+    if (oldJ != 0) { m[0x8C] = bb(groundY - 1); return; }   // post-bounce clean landing (DC87: posY = groundY-1)
     int y = m[0xD4] + (m[0x94] < 2 ? 8 : 0);
-    if (m[0xAC] < kD86C[y] || m[0xAC] >= kD87C[y]) { m[0x98] = 0xFF; return; }
-    if (m[0xAC] == m[0x368] || (m[0xD4] | m[0xCC]) != 0) return; // clean
+    if (m[0xAC] < kD86C[y] || m[0xAC] >= kD87C[y]) { m[0x98] = 0xFF; return; }   // DC69: crash, posY untouched
+    if (m[0xAC] == m[0x368] || (m[0xD4] | m[0xCC]) != 0) { m[0x8C] = bb(groundY - 1); return; } // clean
     m[0x374] = 4; m[0x388] = 2; m[0xB0] = 1;            // wobble -> bounce relaunch
+    m[0x8C] = bb(groundY - 1);
   }
   void arc()  // sub_DCF2
   {

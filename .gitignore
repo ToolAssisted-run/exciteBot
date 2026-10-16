@@ -34,3 +34,5 @@ build/
 
 # Python
 __pycache__/
+# Extracted per-track layouts (game content, regenerable like track_layout.hpp)
+source/track_layout_*.hpp
